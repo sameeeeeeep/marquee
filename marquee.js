@@ -1,6 +1,12 @@
 // ../../packages/protocol/dist/version.js
 var PROVIDER_GLOBAL = "claude";
 
+// ../../packages/protocol/dist/storage.js
+var STORAGE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function isValidStorageKey(key) {
+  return typeof key === "string" && STORAGE_KEY_RE.test(key);
+}
+
 // ../../packages/protocol/dist/errors.js
 var BYOPErrorCode = {
   /** User rejected the connect/consent request. (≈ 4001) */
@@ -25,7 +31,13 @@ var BYOPErrorCode = {
 };
 
 // ../../packages/sdk/dist/connect-chip.js
+function rungFromError(e) {
+  if (e?.code !== BYOPErrorCode.PROVIDER_UNAVAILABLE)
+    return null;
+  return e?.data?.reason === "unpaired" ? { kind: "unpaired" } : { kind: "unreachable" };
+}
 var CHROME_STORE_URL = "https://chromewebstore.google.com/detail/injmjolmnekmahlnackakiamjepegagb";
+var RELAY_DMG_URL = "https://github.com/sameeeeeeep/switchboard/releases/latest/download/Relay.dmg";
 var STYLE = `
 :host { all: initial; }
 * { box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
@@ -140,7 +152,7 @@ function mountConnect(target, opts = {}) {
     if (destroyed || my !== seq)
       return;
     if (h && !h.reachable) {
-      state2 = { kind: "unreachable" };
+      state2 = { kind: "unreachable", appMissing: h.installedHere === false };
       emitTransition(false);
       return render2();
     }
@@ -149,10 +161,20 @@ function mountConnect(target, opts = {}) {
       emitTransition(false);
       return render2();
     }
-    const grant = sessionDisconnected ? null : await r.permissions().catch(() => null);
+    let permErr = null;
+    const grant = sessionDisconnected ? null : await r.permissions().catch((e) => {
+      permErr = e;
+      return null;
+    });
     if (destroyed || my !== seq)
       return;
     if (!grant) {
+      const rung = !h ? rungFromError(permErr) : null;
+      if (rung) {
+        state2 = rung;
+        emitTransition(false);
+        return render2();
+      }
       state2 = { kind: "disconnected", relay: r };
       emitTransition(false);
       return render2();
@@ -205,8 +227,18 @@ function mountConnect(target, opts = {}) {
       await relay2.connect(opts.scope);
       await refresh();
     } catch (e) {
-      if (e?.code === BYOPErrorCode.PROVIDER_UNAVAILABLE)
-        void refresh();
+      const err = e;
+      if (err?.code !== BYOPErrorCode.PROVIDER_UNAVAILABLE)
+        return;
+      await refresh();
+      if (state2.kind === "disconnected") {
+        const rung = rungFromError(err);
+        if (rung) {
+          state2 = rung;
+          emitTransition(false);
+          render2();
+        }
+      }
     }
   }
   async function doPick() {
@@ -245,13 +277,14 @@ function mountConnect(target, opts = {}) {
       wrap2.append(b);
       if (menuOpen) {
         const menu = el2("div", "menu");
-        const store = el2("button", "item", "Add to Chrome \u2197");
+        menu.append(el2("div", "body", "Two parts: the Chrome extension, then Relay for Mac."));
+        const store = el2("button", "item", "1 \xB7 Add to Chrome \u2197");
         store.onclick = () => {
           menuOpen = false;
           render2();
           window.open(CHROME_STORE_URL, "_blank", "noopener");
         };
-        const guide = el2("button", "item", "Full setup guide \u2197");
+        const guide = el2("button", "item", "2 \xB7 Get Relay for Mac \u2197");
         guide.onclick = () => {
           menuOpen = false;
           render2();
@@ -264,9 +297,10 @@ function mountConnect(target, opts = {}) {
       return;
     }
     if (state2.kind === "unreachable") {
+      const appMissing = state2.appMissing === true;
       const wrap2 = el2("div", "wrap");
       const b = el2("button", "btn get");
-      b.append(el2("span", "glyph"), el2("span", void 0, "Your sidekick is asleep"), el2("span", "dot"), el2("span", "caret", "\u25BE"));
+      b.append(el2("span", "glyph"), el2("span", void 0, appMissing ? "Get Relay for Mac" : "Your sidekick is asleep"), el2("span", appMissing ? "arr" : "dot", appMissing ? "\u2197" : void 0), ...appMissing ? [] : [el2("span", "caret", "\u25BE")]);
       b.onclick = (e) => {
         e.stopPropagation();
         menuOpen = !menuOpen;
@@ -275,14 +309,25 @@ function mountConnect(target, opts = {}) {
       wrap2.append(b);
       if (menuOpen) {
         const menu = el2("div", "menu");
-        menu.append(el2("div", "body", "Open the Relay menubar app to wake it."));
-        const retry = el2("button", "item", "Retry");
-        retry.onclick = () => {
-          menuOpen = false;
-          render2();
-          void refresh();
-        };
-        menu.append(retry, el2("div", "sep"));
+        if (appMissing) {
+          menu.append(el2("div", "body", "Extension \u2713 \u2014 now the other half: Relay, the Mac app that holds your Claude."));
+          const dl = el2("button", "item", "Download Relay.dmg \u2197");
+          dl.onclick = () => {
+            menuOpen = false;
+            render2();
+            window.open(RELAY_DMG_URL, "_blank", "noopener");
+          };
+          menu.append(dl, el2("div", "sep"));
+        } else {
+          menu.append(el2("div", "body", "Open the Relay menubar app to wake it."));
+          const retry = el2("button", "item", "Retry");
+          retry.onclick = () => {
+            menuOpen = false;
+            render2();
+            void refresh();
+          };
+          menu.append(retry, el2("div", "sep"));
+        }
         const setup = el2("button", "item", "New here? Full setup \u2197");
         setup.onclick = () => {
           menuOpen = false;
@@ -384,6 +429,16 @@ function mountConnect(target, opts = {}) {
 }
 
 // ../../packages/sdk/dist/index.js
+var warnedStorageKeys = /* @__PURE__ */ new Set();
+function warnBadStorageKey(key) {
+  if (isValidStorageKey(key) || warnedStorageKeys.has(key))
+    return;
+  warnedStorageKeys.add(key);
+  const suggestion = String(key).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "") || "key";
+  console.warn(`[relay.storage] invalid key ${JSON.stringify(key)} \u2014 this write/read WILL be rejected by the daemon and silently do nothing.
+  Keys map 1:1 to files (<key>.json) in this origin's folder, so they must match ${STORAGE_KEY_RE}.
+  ":" is not allowed (illegal on NTFS; "a:b" is Alternate Data Stream syntax on Windows). Try ${JSON.stringify(suggestion)}.`);
+}
 var Relay = class {
   provider;
   constructor(provider) {
@@ -486,14 +541,23 @@ var Relay = class {
    */
   get storage() {
     const req = (params) => this.provider.request({ method: "claude_storage", params });
+    const k = (key) => {
+      warnBadStorageKey(key);
+      return key;
+    };
     return {
-      get: (key) => req({ op: "get", key }).then((r) => r.value ?? null),
-      set: (key, value) => req({ op: "set", key, value }).then(() => void 0),
-      delete: (key) => req({ op: "delete", key }).then((r) => r.ok),
+      get: (key) => req({ op: "get", key: k(key) }).then((r) => r.value ?? null),
+      set: (key, value) => req({ op: "set", key: k(key), value }).then(() => void 0),
+      delete: (key) => req({ op: "delete", key: k(key) }).then((r) => r.ok),
       list: () => req({ op: "list" }).then((r) => r.keys ?? []),
       info: () => req({ op: "info" }).then((r) => r.info),
       /** Point this app's store at a real folder (triggers a path-consent click). */
-      bind: (path) => req({ op: "bind", path }).then((r) => r.info)
+      bind: (path) => req({ op: "bind", path }).then((r) => r.info),
+      /** Open a NATIVE folder chooser on the daemon's machine (macOS today). The user picking a
+       *  folder in an OS dialog that names this origin IS the path consent, so a successful pick
+       *  comes back already bound. Resolves undefined on cancel or when no native picker exists —
+       *  keep a typed-path `bind` as the fallback UI. */
+      pick: (reason) => req({ op: "pick", reason }).then((r) => r.info).catch(() => void 0)
     };
   }
   /**
@@ -619,9 +683,13 @@ function wire(r) {
   wired = true;
   r.on("permissionsChanged", () => void syncContext());
 }
+var hydrated = false;
 async function onReady() {
   await syncContext();
-  await loadState();
+  if (!hydrated) {
+    hydrated = true;
+    await loadState();
+  }
   render();
   autostart();
 }
